@@ -24,7 +24,7 @@ import scala.collection.mutable
 //    - Is this actually a problem?
 //  - Wires in Attach are kept, should they be removed?
 //    - Currently Analog wires can't do anything but connect to other Wires
-object RemoveWires extends Pass {
+object OrderConnections extends Pass {
   // Extract all referential expressions from a possibly nested expression
   // TODO could this be generalized by supporting WSubAccess (which is both a reference and nested)?
   private def extractRefs(expr: Expression): Seq[Expression] = {
@@ -76,24 +76,24 @@ object RemoveWires extends Pass {
 
     order
   }
-  private def getOrderedNodes(
-      nodes: mutable.LinkedHashMap[WrappedExpression, WrappedExpression]): Seq[DefNode] = {
-    val sorted = deterministicTopologicalSort(nodes)
+  // Logic is Nodes and Connections to Wires
+  private def getOrderedLogic(
+      netlist: mutable.LinkedHashMap[WrappedExpression, WrappedExpression]): Seq[Statement] = {
+    val sorted = deterministicTopologicalSort(netlist)
     sorted.map(we => we.e1 match {
-      // Since this is after LowerTypes, DefNodes can only be WRefs
-      case WRef(name, _,_,_) =>
-        val rhs = nodes(we)
-        DefNode(NoInfo, name, rhs.e1)
+      // Since this is after LowerTypes, Nodes and Wires can only be WRefs
+      case WRef(name, _, NodeKind | ExpKind, _) => DefNode(NoInfo, name, netlist(we).e1)
+      case WRef(name, _, WireKind, _) => Connect(NoInfo, we.e1, netlist(we).e1)
       case other => throwInternalError
     })
   }
 
   private def onModule(m: DefModule): DefModule = {
-    // Store all non-wire, non-node declarations here (like reg, inst, and mem)
+    // Store all non-node declarations here (like reg, inst, and mem)
     val decls = mutable.ArrayBuffer.empty[Statement]
     // Store all "other" statements here, non-wire, non-node connections, printfs, etc.
     val otherStmts = mutable.ArrayBuffer.empty[Statement]
-    // Add nodes and wires here
+    // Add nodes and wire connection here
     val netlist = mutable.LinkedHashMap.empty[WrappedExpression, WrappedExpression]
 
 
@@ -101,25 +101,21 @@ object RemoveWires extends Pass {
       stmt match {
         case DefNode(_, name, expr) =>
           netlist(we(WRef(name))) = we(expr)
-        case wire: DefWire => // do nothing, Connect has the interesting information
-          //decls += wire
-          //wireMap += (we(WRef(wire)) -> wire)
+        case wire: DefWire =>
+          decls += wire
         case decl: IsDeclaration => // Other than nodes and wires
           decls += decl
         case con: Connect => kind(con.loc) match {
           case WireKind =>
-            // TODO Make this call to PadWidths less sketchy
-            val fixedCon = PadWidths.onStmt(con) match { case con: Connect => con }
-            netlist(we(fixedCon.loc)) = we(fixedCon.expr)
+            netlist(we(con.loc)) = we(con.expr)
           case _ => otherStmts += con
         }
         case invalid: IsInvalid =>
-          val wireRef = invalid.expr
-          kind(wireRef) match {
+          val ref = invalid.expr
+          kind(ref) match {
             case WireKind =>
-              val width = PadWidths.width(wireRef)
-              val dummyExpr = UIntLiteral(BigInt(0), IntWidth(width))
-              netlist(we(wireRef)) = ValidIf(Utils.zero, dummyExpr, wireRef.tpe)
+              val width = ref.tpe match { case GroundType(width) => width } // LowFirrtl
+              netlist(we(ref)) = ValidIf(Utils.zero, UIntLiteral(BigInt(0), width), ref.tpe)
             case _ => otherStmts += invalid
           }
         case attach: Attach =>
@@ -142,12 +138,19 @@ object RemoveWires extends Pass {
     m match {
       case Module(info, name, ports, body) =>
         onStmt(body)
-        val nodes = getOrderedNodes(netlist)
-        Module(info, name, ports, Block(decls ++ nodes ++ otherStmts))
+        val logic = getOrderedLogic(netlist)
+        //println(nodes.map(_.serialize).mkString("  ", "\n  ", ""))
+        Module(info, name, ports, Block(decls ++ logic ++ otherStmts))
       case m: ExtModule => m
     }
   }
   def run(c: Circuit): Circuit = {
-    Circuit(c.info, c.modules.map(onModule), c.main)
+    //println(" ***** Before ***** ")
+    //println(c.serialize)
+    val res = Circuit(c.info, c.modules.map(onModule), c.main)
+    //println(" ***** After ***** ")
+    //println(res.serialize)
+    //throw new Exception("bail")
+    res
   }
 }
