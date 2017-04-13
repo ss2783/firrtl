@@ -9,10 +9,10 @@ import firrtl.Mappers._
 
 // Makes all implicit width extensions and truncations explicit
 object PadWidths extends Pass {
-  def width(t: Type): Int = bitWidth(t).toInt
-  def width(e: Expression): Int = width(e.tpe)
+  private def width(t: Type): Int = bitWidth(t).toInt
+  private def width(e: Expression): Int = width(e.tpe)
   // Returns an expression with the correct integer width
-  def fixup(i: Int)(e: Expression) = {
+  private def fixup(i: Int)(e: Expression) = {
     def tx = e.tpe match {
       case t: UIntType => UIntType(IntWidth(i))
       case t: SIntType => SIntType(IntWidth(i))
@@ -53,7 +53,7 @@ object PadWidths extends Pass {
   }
 
   // Recursive. Fixes assignments and register initialization widths
-  def onStmt(s: Statement): Statement = s map onExp match {
+  private def onStmt(s: Statement): Statement = s map onExp match {
     case sx: Connect =>
       sx copy (expr = fixup(width(sx.loc))(sx.expr))
     case sx: DefRegister =>
